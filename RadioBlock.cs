@@ -34,6 +34,15 @@ namespace RadioBlocks.NETMF
 
         public RadioBlock( string port, int baudrate)
         {
+            // instead of adding a test project for one function, I just uncomment this
+            // block to make sure the CRC calculation matches the result from the
+            // last page of the RadioBlock Serial Protocol manual.
+            /*
+            byte[] crc = CalculateCRC( new byte[] { 0xAB, 0x02, 0x00, 0x00, 0x00, 0x00 } );
+            Debug.Assert( crc[0] == 0x51);
+            Debug.Assert( crc[0] == 0xE2);
+             */
+
             Debug.Print( "creating serial port (" + port + ", " + baudrate + ", " + Parity.None + ", 8, " + StopBits.One + ")");
             _port = new SerialPort( port, baudrate, Parity.None, 8, StopBits.One);
             Debug.Print( "setting serial port read timeout");
@@ -42,10 +51,42 @@ namespace RadioBlocks.NETMF
             _port.Open();
             Debug.Print( "flushing serial port buffer");
             _port.Flush();
-
+            Debug.Print( "registering serial port data event handler");
+            _port.DataReceived += new SerialDataReceivedEventHandler(serialPort_DataReceived);            
             Debug.Print( "RAM left: " + Debug.GC( true) + " bytes");
         }
+        //-------------------------------------------------------------------------------------------------------------------------------------------
+        /// <summary>
+        /// This event handler gets fired each time new data arrives in the serial buffer.  It appends the data to the
+        /// buffer and then calls the command parser function.
+        /// </summary>
+        /// <param name="sender"></param>
+        /// <param name="e"></param>
+        private void serialPort_DataReceived(object sender, SerialDataReceivedEventArgs e)
+        {
+            // try reading bytes until no bytes left            
+            int bytes_actually_read = 0;
+            while( _port.BytesToRead > 0) {
+                int bytes_to_read = 0;
+                try {
+                    bytes_to_read = _port.BytesToRead;
+                    byte[] temp = new byte[bytes_to_read];
+                    bytes_actually_read = _port.Read( temp, 0, bytes_to_read);
+                    Debug.Assert( bytes_to_read == bytes_actually_read, "Need to handle case where we don't read all of the bytes");
+                } catch( Exception ex) {
+                    Debug.Print( "ERROR: detected error in serialPort_DataReceived (" + ex.Message + ")!");
+                    Debug.Print( "=> _port.BytesToRead: " + bytes_to_read);
+                    Debug.Print( "Flushing buffer and starting over");
+                    _port.Flush();
+                    return;
+                }
+            }
 
+            // if we get into this handler but there wasn't actually any data to read, then bail
+            if( bytes_actually_read == 0)
+                return;
+        }
+        //-------------------------------------------------------------------------------------------------------------------------------------------
         /// <summary>
         /// Just pass in the payload bytes and this method will create the packet + CRC
         /// </summary>
@@ -61,16 +102,47 @@ namespace RadioBlocks.NETMF
             packet[0] = 0xAB; // start byte is a constant
             packet[1] = (byte)payload.Length; // size is the size of the command id + options in payload field
             Array.Copy( payload, 0, packet, 2, payload.Length);
-            CalculateCRC( packet);
+            byte[] crc = CalculateCRC( packet);
+            packet[total_packet_size - 2] = crc[0];
+            packet[total_packet_size - 1] = crc[1];
+
+            _port.Write( packet, 0, packet.Length);
+            // ignoring response for now
         }
 
         /// <summary>
-        /// Given the entire data packet, fills in the CRC bits
+        /// Given the entire data packet, fills in the CRC bits.
         /// </summary>
         /// <param name="packet"></param>
-        private void CalculateCRC( byte[] packet)
+        private byte[] CalculateCRC( byte[] packet)
         {
+            short crc = 0x1234;
+            // CRC is calculated for the payload only, so start the calcs from offset 2
+            // packet length includes the CRC, so only loop up to the third-from-last element
+            for( int i=2; i<packet.Length-2; i++) {
+                byte data = packet[i];
+                data ^= (byte)(crc & 0xFF);
+                data ^= (byte)(data << 4);
+                short a1 = (short)((short)data << 8);
+                short a2 = (short)((crc >> 8) & 0xFF);
+                short a = (short)(a1 | a2);
+                short b = (short)(data >> 4);
+                short c = (short)((short)data << 3);
+                crc = (short)(a ^ b ^ c);
+            }
 
+            return new byte[] { (byte)(crc & 0xFF), (byte)((crc & 0xFF00) >> 8) };
+        }
+
+        private void Test()
+        {
+            SendCommand( new byte[] { 0x01 });
+
+        }
+
+        public void ToggleLed()
+        {
+            SendCommand( new byte[] { 0x80, 0x02 });
         }
     }
 }
